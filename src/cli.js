@@ -109,6 +109,9 @@ async function main() {
     .command("proxy", "Start proxy only")
     .demandCommand(1)
     .strict()
+    .parserConfiguration({
+      "unknown-options-as-args": true,
+    })
     .help()
     .parse();
 
