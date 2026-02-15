@@ -1,0 +1,16 @@
+{
+  "name": "qai",
+  "version": "1.0.0",
+  "type": "module",
+  "bin": {
+    "qai": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js claude"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0",
+    "nvidia-claude-proxy": "^1.0.1",
+    "yargs": "^18.0.0"
+  }
+}
