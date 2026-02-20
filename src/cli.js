@@ -9,6 +9,17 @@ import yaml from "js-yaml";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 
+function isCommandAvailable(cmd) {
+  try {
+    execSync(platform() === "win32" ? `where ${cmd}` : `which ${cmd}`, {
+      stdio: "ignore",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 const proxyPath = fileURLToPath(import.meta.resolve("nvidia-claude-proxy"));
 const configPath = join(homedir(), ".config", "qai", "config.yaml");
 
@@ -22,7 +33,7 @@ function killTree(pid) {
   } catch {
     try {
       process.kill(pid);
-    } catch { }
+    } catch {}
   }
 }
 
@@ -98,15 +109,104 @@ function getProvider(cfg, name) {
   };
 }
 
+function runLs(cfg) {
+  const providers = cfg.providers || {};
+  const names = Object.keys(providers);
+  const defaultName = cfg.provider?.default;
+
+  if (names.length === 0 && !isCommandAvailable("ollama")) {
+    console.log("No providers configured. Create", configPath);
+    return;
+  }
+
+  console.log("Providers:");
+
+  for (const name of names) {
+    const p = providers[name];
+    const marker = name === defaultName ? "*" : " ";
+    const type = p.provider || "zai";
+    const hasToken = p.token ? "✓" : "✗";
+    console.log(
+      ` ${marker} ${name.padEnd(10)} ${type.padEnd(8)} token:${hasToken}`,
+    );
+  }
+
+  if (isCommandAvailable("ollama")) {
+    console.log(
+      "   ollama     local    agents: claude, codex, droid, opencode",
+    );
+  }
+}
+
+function runOllama(agent, args, model) {
+  if (!isCommandAvailable("ollama")) {
+    console.error("Error: ollama CLI not found in PATH");
+    console.error("Install ollama: https://ollama.com/download");
+    process.exit(1);
+  }
+
+  const launchArgs = ["launch", agent];
+  if (model) {
+    launchArgs.push("--model", model);
+  }
+  if (args && args.length > 0) {
+    launchArgs.push(...args);
+  }
+
+  const proc = spawn("ollama", launchArgs, {
+    stdio: "inherit",
+    detached: false,
+  });
+
+  exitWith(proc);
+}
+
 async function main() {
-  const argv = await yargs(hideBin(process.argv))
+  const ollamaAvailable = isCommandAvailable("ollama");
+
+  const parser = yargs(hideBin(process.argv))
     .option("provider", {
       alias: "p",
       type: "string",
       description: "Provider name",
     })
+    .option("model", {
+      alias: "m",
+      type: "string",
+      description: "Model to use (for ollama)",
+    })
     .command("claude [args..]", "Launch claude")
     .command("proxy", "Start proxy only")
+    .command(
+      "ls",
+      "List available providers",
+      () => {},
+      (argv) => {
+        const cfg = loadConfig();
+        runLs(cfg);
+        process.exit(0);
+      },
+    );
+
+  if (ollamaAvailable) {
+    parser.command(
+      "ollama [agent] [args..]",
+      "Launch ollama integration (claude, codex, droid, opencode)",
+      (yargs) => {
+        yargs.positional("agent", {
+          type: "string",
+          describe:
+            "Integration to launch (claude, codex, droid, opencode, openclaw)",
+          default: "claude",
+        });
+      },
+      (argv) => {
+        runOllama(argv.agent, argv.args, argv.model);
+      },
+    );
+  }
+
+  const argv = await parser
     .demandCommand(1)
     .strict()
     .parserConfiguration({
