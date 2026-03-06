@@ -45,6 +45,8 @@ const PROVIDERS = {
   },
 };
 
+const DEFAULT_AGENT = "claude";
+
 function loadConfig() {
   if (!existsSync(configPath)) return {};
   return yaml.load(readFileSync(configPath, "utf8"));
@@ -106,6 +108,7 @@ function getProvider(cfg, name) {
     type,
     needsProxy: def.needsProxy,
     base_url: p.base_url || def.baseUrl,
+    agent: p.agent || DEFAULT_AGENT,
   };
 }
 
@@ -125,9 +128,10 @@ function runLs(cfg) {
     const p = providers[name];
     const marker = name === defaultName ? "*" : " ";
     const type = p.provider || "zai";
+    const agent = p.agent || DEFAULT_AGENT;
     const hasToken = p.token ? "✓" : "✗";
     console.log(
-      ` ${marker} ${name.padEnd(10)} ${type.padEnd(8)} token:${hasToken}`,
+      ` ${marker} ${name.padEnd(10)} ${type.padEnd(8)} agent:${agent.padEnd(8)} token:${hasToken}`,
     );
   }
 
@@ -161,10 +165,44 @@ function runOllama(agent, args, model) {
   exitWith(proc);
 }
 
+// Pre-process args to extract options before positional args confuse yargs
+function preprocessArgs(rawArgs) {
+  const options = {};
+  const remaining = [];
+  let i = 0;
+
+  while (i < rawArgs.length) {
+    const arg = rawArgs[i];
+
+    if (arg === "-p" || arg === "--provider") {
+      options.provider = rawArgs[++i];
+    } else if (arg === "-m" || arg === "--model") {
+      options.model = rawArgs[++i];
+    } else if (arg.startsWith("--provider=")) {
+      options.provider = arg.slice("--provider=".length);
+    } else if (arg.startsWith("-p=")) {
+      options.provider = arg.slice("-p=".length);
+    } else if (arg.startsWith("--model=")) {
+      options.model = arg.slice("--model=".length);
+    } else if (arg.startsWith("-m=")) {
+      options.model = arg.slice("-m=".length);
+    } else {
+      remaining.push(arg);
+    }
+    i++;
+  }
+
+  return { options, remaining };
+}
+
 async function main() {
   const ollamaAvailable = isCommandAvailable("ollama");
 
-  const parser = yargs(hideBin(process.argv))
+  // Pre-process to extract provider/model before yargs
+  const { options: preprocessedOptions, remaining: remainingArgs } =
+    preprocessArgs(hideBin(process.argv));
+
+  const parser = yargs(remainingArgs)
     .option("provider", {
       alias: "p",
       type: "string",
@@ -173,9 +211,19 @@ async function main() {
     .option("model", {
       alias: "m",
       type: "string",
-      description: "Model to use (for ollama)",
+      description: "Model to use",
     })
-    .command("claude [args..]", "Launch claude")
+    .command(
+      "$0 [agent] [args..]",
+      "Launch agent with configured provider",
+      (yargs) => {
+        yargs.positional("agent", {
+          type: "string",
+          describe: "Agent CLI to run",
+          default: DEFAULT_AGENT,
+        });
+      },
+    )
     .command("proxy", "Start proxy only")
     .command(
       "ls",
@@ -201,7 +249,7 @@ async function main() {
         });
       },
       (argv) => {
-        runOllama(argv.agent, argv.args, argv.model);
+        runOllama(argv.agent, argv.args, model || argv.model);
       },
     );
   }
@@ -215,8 +263,12 @@ async function main() {
     .help()
     .parse();
 
+  // Merge preprocessed options with yargs options (preprocessed takes priority)
+  const provider = preprocessedOptions.provider || argv.provider;
+  const model = preprocessedOptions.model || argv.model;
+
   const cfg = loadConfig();
-  const name = argv.provider || cfg.provider?.default;
+  const name = provider || cfg.provider?.default;
 
   if (!name) {
     console.error("Error: No provider. Create", configPath);
@@ -251,56 +303,63 @@ async function main() {
     return;
   }
 
-  if (cmd === "claude") {
-    if (p.needsProxy) {
-      const port = await findPort();
-      console.log(`${name} proxy on :${port}\n`);
-      const proxy = spawnProxy(p.base_url, p.token, port, p.env, false);
-      await new Promise((r) => setTimeout(r, 500));
+  // Default command: run agent
+  const agent = argv.agent || p.agent || DEFAULT_AGENT;
 
-      const claude = spawn("claude", argv.args || [], {
-        stdio: "inherit",
-        env: {
-          ...process.env,
-          ...p.env,
-          ANTHROPIC_MODEL: p.model,
-          ANTHROPIC_AUTH_TOKEN: "qai-proxy",
-          ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
-        },
-        detached: false,
-      });
+  if (!isCommandAvailable(agent)) {
+    console.error(`Error: '${agent}' CLI not found in PATH`);
+    process.exit(1);
+  }
 
-      const cleanup = () => {
-        if (proxy && proxy.pid) killTree(proxy.pid);
-        if (claude && claude.pid) killTree(claude.pid);
-        process.exit(1);
-      };
-      claude.on("exit", (code) => {
-        cleanup();
-        process.exit(code ?? 0);
-      });
-      proxy.on("exit", () => {
-        cleanup();
-      });
-      process.on("SIGINT", cleanup);
-      process.on("SIGTERM", cleanup);
-      process.on("SIGUSR1", cleanup);
-      process.on("SIGUSR2", cleanup);
-      process.on("exit", cleanup);
-      process.on("uncaughtException", cleanup);
-      process.on("unhandledRejection", cleanup);
-    } else {
-      const claude = spawn("claude", argv.args || [], {
-        stdio: "inherit",
-        env: {
-          ...process.env,
-          ...p.env,
-          ANTHROPIC_AUTH_TOKEN: p.token,
-          ...(p.base_url && { ANTHROPIC_BASE_URL: p.base_url }),
-        },
-      });
-      exitWith(claude);
-    }
+  if (p.needsProxy) {
+    const port = await findPort();
+    console.log(`${name} proxy on :${port}\n`);
+    const proxy = spawnProxy(p.base_url, p.token, port, p.env, false);
+    await new Promise((r) => setTimeout(r, 500));
+
+    const agentProc = spawn(agent, argv.args || [], {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        ...p.env,
+        ANTHROPIC_MODEL: model || p.model,
+        ANTHROPIC_AUTH_TOKEN: "qai-proxy",
+        ANTHROPIC_BASE_URL: `http://127.0.0.1:${port}`,
+      },
+      detached: false,
+    });
+
+    const cleanup = () => {
+      if (proxy && proxy.pid) killTree(proxy.pid);
+      if (agentProc && agentProc.pid) killTree(agentProc.pid);
+      process.exit(1);
+    };
+    agentProc.on("exit", (code) => {
+      cleanup();
+      process.exit(code ?? 0);
+    });
+    proxy.on("exit", () => {
+      cleanup();
+    });
+    process.on("SIGINT", cleanup);
+    process.on("SIGTERM", cleanup);
+    process.on("SIGUSR1", cleanup);
+    process.on("SIGUSR2", cleanup);
+    process.on("exit", cleanup);
+    process.on("uncaughtException", cleanup);
+    process.on("unhandledRejection", cleanup);
+  } else {
+    const agentProc = spawn(agent, argv.args || [], {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        ...p.env,
+        ANTHROPIC_AUTH_TOKEN: p.token,
+        ...(p.base_url && { ANTHROPIC_BASE_URL: p.base_url }),
+        ...((model || p.model) && { ANTHROPIC_MODEL: model || p.model }),
+      },
+    });
+    exitWith(agentProc);
   }
 }
 

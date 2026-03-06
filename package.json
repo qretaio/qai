@@ -6,7 +6,7 @@
     "qai": "./src/cli.js"
   },
   "scripts": {
-    "start": "node src/cli.js claude"
+    "start": "node src/cli.js"
   },
   "dependencies": {
     "js-yaml": "^4.1.0",
