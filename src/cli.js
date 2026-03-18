@@ -33,7 +33,7 @@ function killTree(pid) {
   } catch {
     try {
       process.kill(pid);
-    } catch {}
+    } catch { }
   }
 }
 
@@ -42,6 +42,9 @@ const PROVIDERS = {
   nvidia: {
     needsProxy: true,
     baseUrl: "https://integrate.api.nvidia.com/v1/chat/completions",
+  },
+  ollama: {
+    baseUrl: "http://localhost:11434",
   },
 };
 
@@ -103,12 +106,14 @@ function getProvider(cfg, name) {
   const def = PROVIDERS[type];
   if (!def) return { error: `Unknown provider type '${type}'` };
 
+  let base_url = p.base_url || p.endpoint || def.baseUrl;
   return {
     ...p,
     type,
     needsProxy: def.needsProxy,
-    base_url: p.base_url || def.baseUrl,
+    base_url,
     agent: p.agent || DEFAULT_AGENT,
+    token: p.token ?? "",
   };
 }
 
@@ -117,7 +122,7 @@ function runLs(cfg) {
   const names = Object.keys(providers);
   const defaultName = cfg.provider?.default;
 
-  if (names.length === 0 && !isCommandAvailable("ollama")) {
+  if (names.length === 0) {
     console.log("No providers configured. Create", configPath);
     return;
   }
@@ -129,40 +134,11 @@ function runLs(cfg) {
     const marker = name === defaultName ? "*" : " ";
     const type = p.provider || "zai";
     const agent = p.agent || DEFAULT_AGENT;
-    const hasToken = p.token ? "✓" : "✗";
+    const hasToken = p.token ? "✓" : "-";
     console.log(
       ` ${marker} ${name.padEnd(10)} ${type.padEnd(8)} agent:${agent.padEnd(8)} token:${hasToken}`,
     );
   }
-
-  if (isCommandAvailable("ollama")) {
-    console.log(
-      "   ollama     local    agents: claude, codex, droid, opencode",
-    );
-  }
-}
-
-function runOllama(agent, args, model) {
-  if (!isCommandAvailable("ollama")) {
-    console.error("Error: ollama CLI not found in PATH");
-    console.error("Install ollama: https://ollama.com/download");
-    process.exit(1);
-  }
-
-  const launchArgs = ["launch", agent];
-  if (model) {
-    launchArgs.push("--model", model);
-  }
-  if (args && args.length > 0) {
-    launchArgs.push(...args);
-  }
-
-  const proc = spawn("ollama", launchArgs, {
-    stdio: "inherit",
-    detached: false,
-  });
-
-  exitWith(proc);
 }
 
 // Pre-process args to extract options before positional args confuse yargs
@@ -196,8 +172,6 @@ function preprocessArgs(rawArgs) {
 }
 
 async function main() {
-  const ollamaAvailable = isCommandAvailable("ollama");
-
   // Pre-process to extract provider/model before yargs
   const { options: preprocessedOptions, remaining: remainingArgs } =
     preprocessArgs(hideBin(process.argv));
@@ -228,31 +202,13 @@ async function main() {
     .command(
       "ls",
       "List available providers",
-      () => {},
+      () => { },
       (argv) => {
         const cfg = loadConfig();
         runLs(cfg);
         process.exit(0);
       },
     );
-
-  if (ollamaAvailable) {
-    parser.command(
-      "ollama [agent] [args..]",
-      "Launch ollama integration (claude, codex, droid, opencode)",
-      (yargs) => {
-        yargs.positional("agent", {
-          type: "string",
-          describe:
-            "Integration to launch (claude, codex, droid, opencode, openclaw)",
-          default: "claude",
-        });
-      },
-      (argv) => {
-        runOllama(argv.agent, argv.args, model || argv.model);
-      },
-    );
-  }
 
   const argv = await parser
     .demandCommand(1)
@@ -282,10 +238,6 @@ async function main() {
   }
   if (p.error) {
     console.error("Error:", p.error);
-    process.exit(1);
-  }
-  if (!p.token) {
-    console.error(`Error: No token for '${name}'`);
     process.exit(1);
   }
 
@@ -354,7 +306,7 @@ async function main() {
       env: {
         ...process.env,
         ...p.env,
-        ANTHROPIC_AUTH_TOKEN: p.token,
+        ...({ ANTHROPIC_AUTH_TOKEN: p.token ?? "" }),
         ...(p.base_url && { ANTHROPIC_BASE_URL: p.base_url }),
         ...((model || p.model) && { ANTHROPIC_MODEL: model || p.model }),
       },
