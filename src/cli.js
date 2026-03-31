@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, execSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,7 +33,7 @@ function killTree(pid) {
   } catch {
     try {
       process.kill(pid);
-    } catch { }
+    } catch {}
   }
 }
 
@@ -115,6 +115,37 @@ function getProvider(cfg, name) {
     agent: p.agent || DEFAULT_AGENT,
     token: p.token ?? "",
   };
+}
+
+// Update pi's models.json to point to the specified ollama endpoint
+function updatePiOllamaConfig(baseUrl, model) {
+  const piConfigDir = join(homedir(), ".pi", "agent");
+  const piModelsPath = join(piConfigDir, "models.json");
+
+  if (!existsSync(piModelsPath)) return;
+
+  try {
+    const piConfig = JSON.parse(readFileSync(piModelsPath, "utf8"));
+
+    if (piConfig.providers?.ollama) {
+      // Update the ollama provider's baseUrl and model
+      piConfig.providers.ollama.baseUrl = `${baseUrl}/v1`;
+      if (model) {
+        piConfig.providers.ollama.models = [
+          {
+            _launch: true,
+            contextWindow: 262144,
+            id: model,
+            input: ["text"],
+          },
+        ];
+      }
+
+      writeFileSync(piModelsPath, JSON.stringify(piConfig, null, 2));
+    }
+  } catch {
+    // Ignore errors - pi config is optional
+  }
 }
 
 function runLs(cfg) {
@@ -202,7 +233,7 @@ async function main() {
     .command(
       "ls",
       "List available providers",
-      () => { },
+      () => {},
       (argv) => {
         const cfg = loadConfig();
         runLs(cfg);
@@ -301,15 +332,41 @@ async function main() {
     process.on("uncaughtException", cleanup);
     process.on("unhandledRejection", cleanup);
   } else {
+    // Build env vars based on provider type
+    const envVars = {
+      ...process.env,
+      ...p.env,
+    };
+
+    // For ollama provider, set OLLAMA_HOST environment variable
+    // Note: Some agents (like pi) may not respect this and need their own config
+    if (p.type === "ollama") {
+      if (p.base_url) {
+        envVars.OLLAMA_HOST = p.base_url;
+        envVars.ANTHROPIC_BASE_URL = p.base_url;
+      }
+      if (model || p.model) {
+        envVars.ANTHROPIC_MODEL = model || p.model;
+      }
+      envVars.ANTHROPIC_AUTH_TOKEN = p.token ?? "";
+    } else {
+      envVars.ANTHROPIC_AUTH_TOKEN = p.token ?? "";
+      if (p.base_url) {
+        envVars.ANTHROPIC_BASE_URL = p.base_url;
+      }
+      if (model || p.model) {
+        envVars.ANTHROPIC_MODEL = model || p.model;
+      }
+    }
+
+    // Update pi's config if using ollama provider with pi agent
+    if (p.type === "ollama" && agent === "pi") {
+      updatePiOllamaConfig(p.base_url, model || p.model);
+    }
+
     const agentProc = spawn(agent, argv.args || [], {
       stdio: "inherit",
-      env: {
-        ...process.env,
-        ...p.env,
-        ...({ ANTHROPIC_AUTH_TOKEN: p.token ?? "" }),
-        ...(p.base_url && { ANTHROPIC_BASE_URL: p.base_url }),
-        ...((model || p.model) && { ANTHROPIC_MODEL: model || p.model }),
-      },
+      env: envVars,
     });
     exitWith(agentProc);
   }
